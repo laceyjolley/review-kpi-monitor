@@ -363,7 +363,7 @@ const {
 // Paste your Apps Script Web App URL here (ends in /exec) to have the dashboard pull
 // live from Google Sheets. Leave blank to keep using Reviews_KPIs.xlsx uploaded to
 // this same repo. See apps-script.gs.txt for the script to deploy on your Sheet.
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwyuCzuEs6PZevE8taSKfvzQBPHW2MetUL9gkp3nppZFL6VsMp83JmlQyIidd1M6bUE/exec";
+const APPS_SCRIPT_URL = "";
 const AXIS = ["Oct 2025", "Nov 2025", "Dec 2025", "Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026"];
 const SHORT = m => m.replace(" 20", " '");
 
@@ -461,7 +461,13 @@ const LAUNCH_SUBTYPE_TO_LINE = {
 };
 function launchLineFor(subtype) {
   if (!subtype) return null;
-  return LAUNCH_SUBTYPE_TO_LINE[subtype.toString().trim().toLowerCase()] || null;
+  const key = subtype.toString().trim();
+  if (!key) return null;
+  const mapped = LAUNCH_SUBTYPE_TO_LINE[key.toLowerCase()];
+  if (mapped) return mapped;
+  // No explicit mapping (e.g. a newer product type) — use the checklist's own subtype
+  // text, title-cased, rather than dropping the item from grouping/filtering entirely.
+  return key.replace(/[a-zA-Z]+/g, w => w[0].toUpperCase() + w.slice(1).toLowerCase());
 }
 
 // Matches checklist tabs named either "6/29-7/3 Monthly Check" (current Google Sheets
@@ -1654,6 +1660,7 @@ function Launch({
   months: dashMonths
 }) {
   const [category, setCategory] = useState("All"); // All | Mixed | Own Parent
+  const [plFilter, setPlFilter] = useState("All"); // product line filter for the detail table
 
   if (!launch || !launch.items || !launch.items.length) {
     return /*#__PURE__*/React.createElement(Panel, {
@@ -1696,6 +1703,7 @@ function Launch({
     if (a.brand !== b.brand) return a.brand.localeCompare(b.brand);
     return a.parentSku.localeCompare(b.parentSku);
   });
+  const tableRows = sorted.filter(item => plFilter === "All" || item.productLine === plFilter);
   const counts = {
     total: shown.length,
     meeting: shown.filter(i => i.status === "meeting").length,
@@ -1808,8 +1816,17 @@ function Launch({
     yFormat: p.fmt
   }))), /*#__PURE__*/React.createElement(Panel, {
     title: "Launch Groups — Detail",
-    ctx: `${sorted.length} shown`
+    ctx: `${tableRows.length} of ${sorted.length} shown`
   }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Seg, {
+    options: [["All", "All"], ...productLines.map(pl => [pl, pl])],
+    value: plFilter,
+    onChange: setPlFilter,
+    small: true
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: "auto"
     }
@@ -1830,7 +1847,7 @@ function Launch({
   }, ["Parent SKU", "Brand", "Type", "Product Line", "Launch Month", "Target", "Latest Rating", "Latest Reviews", "Status"].map(h => /*#__PURE__*/React.createElement("th", {
     key: h,
     style: th
-  }, h)))), /*#__PURE__*/React.createElement("tbody", null, sorted.map(item => /*#__PURE__*/React.createElement("tr", {
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, tableRows.map(item => /*#__PURE__*/React.createElement("tr", {
     key: item.parentAsin,
     style: {
       borderTop: "1px solid var(--line-soft)"
