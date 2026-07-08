@@ -360,10 +360,10 @@ const {
  * ------------------------------------------------------------------ */
 
 // unified month axis (extend here as the sheet grows)
-// Paste your Google Sheet ID here (the long string in the sheet's URL, between /d/ and /edit)
-// to have the dashboard pull live from Google Sheets instead of a repo-hosted file.
-// Leave blank to keep using Reviews_KPIs.xlsx uploaded to this same repo.
-const GOOGLE_SHEET_ID = "";
+// Paste your Apps Script Web App URL here (ends in /exec) to have the dashboard pull
+// live from Google Sheets. Leave blank to keep using Reviews_KPIs.xlsx uploaded to
+// this same repo. See apps-script.gs.txt for the script to deploy on your Sheet.
+const APPS_SCRIPT_URL = "";
 const AXIS = ["Oct 2025", "Nov 2025", "Dec 2025", "Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026"];
 const SHORT = m => m.replace(" 20", " '");
 
@@ -535,13 +535,23 @@ function parseChecklistTab(rows) {
   }
   return out;
 }
-function parseLaunchTracker(wb) {
-  const lt = wb.Sheets["Launch Tracker"];
-  if (!lt) return null;
-  const rows = XLSX.utils.sheet_to_json(lt, {
+// Reads sheets the same way regardless of source: a real SheetJS workbook (from
+// XLSX.read on an uploaded/fetched .xlsx file) or a plain JSON feed from the Apps
+// Script bridge ({ __jsonFeed: true, sheetNames: [...], sheets: { name: 2D array } }).
+function wbSheetNames(wb) {
+  return wb.__jsonFeed ? wb.sheetNames : wb.SheetNames;
+}
+function wbRows(wb, name) {
+  if (wb.__jsonFeed) return wb.sheets[name] || null;
+  const ws = wb.Sheets[name];
+  return ws ? XLSX.utils.sheet_to_json(ws, {
     header: 1,
     blankrows: false
-  });
+  }) : null;
+}
+function parseLaunchTracker(wb) {
+  const rows = wbRows(wb, "Launch Tracker");
+  if (!rows) return null;
   const items = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
@@ -568,16 +578,14 @@ function parseLaunchTracker(wb) {
   }
   if (!items.length) return null;
   const monthChecks = {};
-  wb.SheetNames.forEach(name => {
+  wbSheetNames(wb).forEach(name => {
     const monthLabel = checkTabMonthLabel(name);
     if (!monthLabel) return;
-    const ws = wb.Sheets[name];
-    const rowsChk = XLSX.utils.sheet_to_json(ws, {
-      header: 1,
-      blankrows: false
-    });
+    const rowsChk = wbRows(wb, name);
+    if (!rowsChk) return;
     const parsed = parseChecklistTab(rowsChk);
     monthChecks[monthLabel] = Object.assign({}, monthChecks[monthLabel] || {}, parsed);
+
   });
   const checkMonths = Object.keys(monthChecks).sort((a, b) => {
     const ai = AXIS.indexOf(a),
@@ -633,12 +641,8 @@ function parseLaunchTracker(wb) {
 
 function parseWorkbook(wb) {
   // ---------- 2026 KPIs ----------
-  const ws26 = wb.Sheets["2026 KPIs"];
-  if (!ws26) throw new Error("Tab '2026 KPIs' not found.");
-  const r26 = XLSX.utils.sheet_to_json(ws26, {
-    header: 1,
-    blankrows: false
-  });
+  const r26 = wbRows(wb, "2026 KPIs");
+  if (!r26) throw new Error("Tab '2026 KPIs' not found.");
 
   // company KPIs (left): A label, C..H = Jan..Jun 2026
   const KPI_KEYS = {
@@ -665,14 +669,11 @@ function parseWorkbook(wb) {
   const lines2026 = readLineBlock(r26.slice(2), 9, months2026, [10, 14, 18, 22, 26, 30], 2, 3);
 
   // ---------- 2025 KPIs ----------
-  const ws25 = wb.Sheets["2025 KPIs"];
+  const r25all = wbRows(wb, "2025 KPIs");
   let lines2025 = {};
   const kpi2025 = {};
-  if (ws25) {
-    const r25 = XLSX.utils.sheet_to_json(ws25, {
-      header: 1,
-      blankrows: false
-    });
+  if (r25all) {
+    const r25 = r25all;
     const months2025 = ["Oct 2025", "Nov 2025", "Dec 2025"];
     // company KPIs: C..E = Oct..Dec
     const map25 = {
@@ -737,12 +738,9 @@ function parseWorkbook(wb) {
 
   // ---------- Parents Meeting Targets ----------
   let parents = [];
-  const pt = wb.Sheets["Parents Meeting Targets"];
-  if (pt) {
-    const pr = XLSX.utils.sheet_to_json(pt, {
-      header: 1,
-      blankrows: false
-    });
+  const prAll = wbRows(wb, "Parents Meeting Targets");
+  if (prAll) {
+    const pr = prAll;
     const PT_MONTHS = ["Dec", "Jan", "Feb", "March", "April", "May"];
     for (let i = 1; i < pr.length; i++) {
       const row = pr[i];
@@ -783,12 +781,9 @@ function parseWorkbook(wb) {
 
   // ---------- Pending Resolution (validation watch list) ----------
   let pending = [];
-  const prTab = wb.Sheets["Pending Resolution"];
-  if (prTab) {
-    const prRows = XLSX.utils.sheet_to_json(prTab, {
-      header: 1,
-      blankrows: false
-    });
+  const prTabRows = wbRows(wb, "Pending Resolution");
+  if (prTabRows) {
+    const prRows = prTabRows;
     const lineByName = Object.fromEntries(lines.map(l => [l.name, l]));
     for (let i = 1; i < prRows.length; i++) {
       const r = prRows[i];
@@ -854,35 +849,50 @@ function ReviewKPIDashboard() {
     }
   }, []);
   // On load, try each data source in turn so the dashboard opens already showing the
-  // latest data with no manual upload: first a live Google Sheet (if GOOGLE_SHEET_ID is
-  // set), then a Reviews_KPIs.xlsx file sitting next to this page in the same repo. If
-  // none of those work, fall back to the manual upload screen.
+  // latest data with no manual upload: first the Apps Script JSON feed (if
+  // APPS_SCRIPT_URL is set — this is the reliable live-Google-Sheets path, since a
+  // direct fetch() of Google's own export link gets silently blocked by the browser's
+  // CORS policy), then a Reviews_KPIs.xlsx file sitting next to this page in the same
+  // repo. If none of those work, fall back to the manual upload screen.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const sources = [];
-      if (GOOGLE_SHEET_ID) {
-        sources.push(`https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/export?format=xlsx&t=${Date.now()}`);
-      }
-      sources.push("Reviews_KPIs.xlsx?t=" + Date.now());
-      for (const url of sources) {
+      if (APPS_SCRIPT_URL) {
         try {
-          const res = await fetch(url);
-          if (!res.ok) continue;
+          const res = await fetch(`${APPS_SCRIPT_URL}?t=${Date.now()}`);
+          if (res.ok) {
+            const feed = await res.json();
+            const wb = {
+              __jsonFeed: true,
+              sheetNames: feed.sheetNames,
+              sheets: feed.sheets
+            };
+            const parsed = parseWorkbook(wb);
+            if (parsed.lines.length && !cancelled) {
+              setData(parsed);
+              setActiveLines(new Set(parsed.lines.map(l => l.name)));
+              return;
+            }
+          }
+        } catch (e) {
+          // Apps Script feed didn't work — fall through to the repo file below
+        }
+      }
+      try {
+        const res = await fetch("Reviews_KPIs.xlsx?t=" + Date.now());
+        if (res.ok) {
           const buf = await res.arrayBuffer();
           const wb = XLSX.read(buf, {
             type: "array"
           });
           const parsed = parseWorkbook(wb);
-          if (!parsed.lines.length) continue;
-          if (!cancelled) {
+          if (parsed.lines.length && !cancelled) {
             setData(parsed);
             setActiveLines(new Set(parsed.lines.map(l => l.name)));
           }
-          return;
-        } catch (e) {
-          // this source didn't work — try the next one
         }
+      } catch (e) {
+        // no auto-loadable source — that's fine, the manual upload screen covers it
       }
     })().finally(() => {
       if (!cancelled) setAutoLoading(false);
