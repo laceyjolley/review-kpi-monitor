@@ -360,6 +360,10 @@ const {
  * ------------------------------------------------------------------ */
 
 // unified month axis (extend here as the sheet grows)
+// Paste your Google Sheet ID here (the long string in the sheet's URL, between /d/ and /edit)
+// to have the dashboard pull live from Google Sheets instead of a repo-hosted file.
+// Leave blank to keep using Reviews_KPIs.xlsx uploaded to this same repo.
+const GOOGLE_SHEET_ID = "";
 const AXIS = ["Oct 2025", "Nov 2025", "Dec 2025", "Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026"];
 const SHORT = m => m.replace(" 20", " '");
 
@@ -840,26 +844,44 @@ function ReviewKPIDashboard() {
       setErr("Couldn't read that file: " + e.message);
     }
   }, []);
-  // On load, try to auto-fetch Reviews_KPIs.xlsx sitting next to this page (e.g. in the
-  // same GitHub repo) so the dashboard opens already showing the latest data. If that file
-  // isn't there (404, or opened locally without a server), fall back to the manual upload UI.
+  // On load, try each data source in turn so the dashboard opens already showing the
+  // latest data with no manual upload: first a live Google Sheet (if GOOGLE_SHEET_ID is
+  // set), then a Reviews_KPIs.xlsx file sitting next to this page in the same repo. If
+  // none of those work, fall back to the manual upload screen.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const res = await fetch("Reviews_KPIs.xlsx?t=" + Date.now());
-        if (!res.ok) throw new Error("not found");
-        if (!cancelled) await onFile(res);
-      } catch (e) {
-        // no auto-loadable file here — that's fine, just show the manual upload screen
-      } finally {
-        if (!cancelled) setAutoLoading(false);
+      const sources = [];
+      if (GOOGLE_SHEET_ID) {
+        sources.push(`https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/export?format=xlsx&t=${Date.now()}`);
       }
-    })();
+      sources.push("Reviews_KPIs.xlsx?t=" + Date.now());
+      for (const url of sources) {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) continue;
+          const buf = await res.arrayBuffer();
+          const wb = XLSX.read(buf, {
+            type: "array"
+          });
+          const parsed = parseWorkbook(wb);
+          if (!parsed.lines.length) continue;
+          if (!cancelled) {
+            setData(parsed);
+            setActiveLines(new Set(parsed.lines.map(l => l.name)));
+          }
+          return;
+        } catch (e) {
+          // this source didn't work — try the next one
+        }
+      }
+    })().finally(() => {
+      if (!cancelled) setAutoLoading(false);
+    });
     return () => {
       cancelled = true;
     };
-  }, [onFile]);
+  }, []);
   const handleInput = e => {
     const f = e.target.files?.[0];
     if (f) onFile(f);
