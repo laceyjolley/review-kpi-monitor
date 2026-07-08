@@ -464,18 +464,27 @@ function launchLineFor(subtype) {
   return LAUNCH_SUBTYPE_TO_LINE[subtype.toString().trim().toLowerCase()] || null;
 }
 
-// Matches checklist tabs named like "427-430 Monthly Check" / "518-522 Weekly Check".
-// The leading number is startMonth+startDay (no leading zero on day); we only need the
-// month bucket, taken from the start date. Assumes the workbook's current cycle year —
-// revisit this if the dashboard is still in use once the naming rolls into a new year.
-const CHECK_TAB_RE = /^(\d{3,4})-(\d{1,3})\s+(Monthly|Weekly)\s+Check$/i;
+// Matches checklist tabs named either "6/29-7/3 Monthly Check" (current Google Sheets
+// naming: M/D-M/D) or the older "427-430 Monthly Check" squished-digit format. Either way
+// we only need the month bucket, taken from the start date. Assumes the workbook's current
+// cycle year — revisit this if the dashboard is still in use once the naming rolls into a
+// new year.
+const CHECK_TAB_RE_SLASH = /^(\d{1,2})\/(\d{1,2})-(\d{1,2})\/(\d{1,2})\s+(Monthly|Weekly)\s+Check$/i;
+const CHECK_TAB_RE_COMPACT = /^(\d{3,4})-(\d{1,3})\s+(Monthly|Weekly)\s+Check$/i;
 function checkTabMonthLabel(sheetName) {
-  const m = sheetName.trim().match(CHECK_TAB_RE);
-  if (!m) return null;
-  const startStr = m[1];
-  const monthNum = startStr.length === 4 ? parseInt(startStr.slice(0, 2), 10) : parseInt(startStr.slice(0, 1), 10);
-  if (!(monthNum >= 1 && monthNum <= 12)) return null;
-  return `${MON3[monthNum - 1]} 2026`;
+  const name = sheetName.trim();
+  let m = name.match(CHECK_TAB_RE_SLASH);
+  if (m) {
+    const monthNum = parseInt(m[1], 10);
+    if (monthNum >= 1 && monthNum <= 12) return `${MON3[monthNum - 1]} 2026`;
+  }
+  m = name.match(CHECK_TAB_RE_COMPACT);
+  if (m) {
+    const startStr = m[1];
+    const monthNum = startStr.length === 4 ? parseInt(startStr.slice(0, 2), 10) : parseInt(startStr.slice(0, 1), 10);
+    if (monthNum >= 1 && monthNum <= 12) return `${MON3[monthNum - 1]} 2026`;
+  }
+  return null;
 }
 
 // Scans a checklist-tab sheet (any number of side-by-side brand blocks) for "Listing N"
