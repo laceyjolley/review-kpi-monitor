@@ -469,6 +469,17 @@ function launchLineFor(subtype) {
   // text, title-cased, rather than dropping the item from grouping/filtering entirely.
   return key.replace(/[a-zA-Z]+/g, w => w[0].toUpperCase() + w.slice(1).toLowerCase());
 }
+// Buckets a launch parent's product line into the same Zip Bags / Bags / Labels
+// groupings used on the Product Lines tab, so Launch Tracker can filter the same way.
+function broadCategoryFor(productLine) {
+  if (!productLine) return "Labels";
+  const c = CATEGORY[productLine];
+  if (c === "Zip Bags" || c === "Bags") return "Bags";
+  if (c === "Labels") return "Labels";
+  const lower = productLine.toLowerCase();
+  if (lower.includes("bag")) return "Bags";
+  return "Labels";
+}
 
 // Matches checklist tabs named either "6/29-7/3 Monthly Check" (current Google Sheets
 // naming: M/D-M/D) or the older "427-430 Monthly Check" squished-digit format. Either way
@@ -743,6 +754,37 @@ function parseWorkbook(wb) {
   }) || Object.values(kpi).some(o => o[m] != null));
 
   // ---------- Parents Meeting Targets ----------
+  // "Your Avg" for each line comes from the most recent month of actual line-level
+  // data in 2026 KPIs (the `lines` array built above), not from a static column in
+  // this sheet — that keeps it in sync with whatever month is most current, without
+  // needing this sheet's own avg column kept up to date in parallel.
+  function latestAvgFor(name) {
+    const line = lines.find(l => l.name === name);
+    if (!line) return null;
+    for (let i = monthsWithData.length - 1; i >= 0; i--) {
+      const ai = AXIS.indexOf(monthsWithData[i]);
+      const v = line.series[ai]?.avg;
+      if (v != null) return v;
+    }
+    return null;
+  }
+  // Some categories aren't broken out by sub-type in 2026 KPIs the way this sheet
+  // breaks them out (e.g. Resealable/Permanent SFW Bags, 1.1 Mil/2 Mil Flat Bags) —
+  // for those, fall back to the parent category's own line. A few category names
+  // also differ slightly between the two tabs.
+  const PT_TYPE_ALIAS = {
+    "Suff Bags": "SFW Bags",
+    "Frosted Sliders": "Frosted Slider Bags",
+    "Direct Thermal": "Direct Thermal Labels",
+    "Warning Labels": "Warning/Moving Labels"
+  };
+  function resolveAvg(type, subClean) {
+    if (subClean) {
+      const v = latestAvgFor(subClean);
+      if (v != null) return v;
+    }
+    return latestAvgFor(PT_TYPE_ALIAS[type] || type);
+  }
   let parents = [];
   const prAll = wbRows(wb, "Parents Meeting Targets");
   if (prAll) {
@@ -762,7 +804,10 @@ function parseWorkbook(wb) {
           pct: pct(row[b + 2])
         };
       });
-      if (series.some(s => s.pct != null) || type === "Overall") {
+      const subCleanCheck = sub && sub.toLowerCase() !== "all" ? sub : "";
+      const hasTarget = toNum(row[5]) != null;
+      const hasAvg = type === "Overall" ? toNum(row[3]) != null : resolveAvg(type, subCleanCheck) != null;
+      if (series.some(s => s.pct != null) || type === "Overall" || hasTarget || hasAvg) {
         // category for grouping/filtering the trend graph
         let cat = "Other";
         if (type === "Overall") cat = "Overall";else if (["Zip Bags", "Flat Bags", "Cello Bags", "Suff Bags", "Frosted Sliders", "Poly Tubing"].includes(type)) cat = "Bags";else if (["Direct Thermal", "Laser Labels", "Clear Labels", "Warning Labels"].includes(type)) cat = "Labels";
@@ -776,12 +821,48 @@ function parseWorkbook(wb) {
           category: cat,
           isOverall: type === "Overall",
           reviewCount: toNum(row[2]),
-          avg: toNum(row[3]),
+          avg: type === "Overall" ? toNum(row[3]) : resolveAvg(type, subClean),
           compAvg: toNum(row[4]),
           target: toNum(row[5]),
           series
         });
       }
+    }
+    // Combine only the Direct Thermal sub-rows that don't have their own dedicated
+    // line in 2026 KPIs (Color/White/Fanfold — tracked together under Zebra/Rollo)
+    // into a single row. DYMO and Brother DO have their own lines in 2026 KPIs, so
+    // they stay as their own separate rows with their own average, even though
+    // they're nested under the same "Direct Thermal" type in this sheet.
+    const dtAll = parents.filter(p => p.type === "Direct Thermal");
+    const dtMerge = dtAll.filter(p => !lines.some(l => l.name.toLowerCase() === (p.sub || "").toLowerCase()));
+    if (dtMerge.length > 1) {
+      const mergeSubs = new Set(dtMerge.map(p => p.sub));
+      parents = parents.filter(p => !(p.type === "Direct Thermal" && mergeSubs.has(p.sub)));
+      const mergedSeries = PT_MONTHS.map((_, gi) => {
+        const total = dtMerge.reduce((a, p) => a + (p.series[gi].total || 0), 0) || null;
+        const meeting = dtMerge.reduce((a, p) => a + (p.series[gi].meeting || 0), 0) || null;
+        const pctVal = total ? meeting / total : null;
+        return {
+          total,
+          meeting,
+          pct: pctVal
+        };
+      });
+      const combinedTarget = dtMerge.map(p => p.target).find(v => v != null) ?? null;
+      const combinedReviews = dtMerge.reduce((a, p) => a + (p.reviewCount || 0), 0) || null;
+      parents.push({
+        type: "Direct Thermal",
+        sub: "",
+        label: "Zebra/Rollo Direct Thermal",
+        shortLabel: "Zebra/Rollo Direct Thermal",
+        category: "Labels",
+        isOverall: false,
+        reviewCount: combinedReviews,
+        avg: latestAvgFor("Zebra/Rollo") ?? latestAvgFor("Direct Thermal Labels"),
+        compAvg: null,
+        target: combinedTarget,
+        series: mergedSeries
+      });
     }
   }
 
@@ -987,7 +1068,7 @@ function ReviewKPIDashboard() {
       marginBottom: 18
     }
   }, /*#__PURE__*/React.createElement(Seg, {
-    options: [["overview", "Overview"], ["lines", "Product Lines"], ["pending", "Pending Resolution"], ["launch", "Launch Tracker"]],
+    options: [["overview", "Overview"], ["lines", "Product Lines"], ["launch", "Launch Tracker"], ["pending", "Pending Resolution"]],
     value: view,
     onChange: setView
   }), /*#__PURE__*/React.createElement("div", {
@@ -1147,13 +1228,28 @@ function MultiLineChart({
     n.has(name) ? n.delete(name) : n.add(name);
     setHidden(n);
   };
+  const selectAll = () => setHidden(new Set());
+  const deselectAll = () => setHidden(new Set(series));
   const legendPayload = series.map(name => ({
     value: name,
     type: "line",
     id: name,
     color: hidden.has(name) ? "#b6bcc4" : colorOf(name)
   }));
-  return /*#__PURE__*/React.createElement("div", {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, series.length > 1 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 6,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: selectAll,
+    style: toggleBtn
+  }, "Select all"), /*#__PURE__*/React.createElement("button", {
+    onClick: deselectAll,
+    style: toggleBtn
+  }, "Deselect all")), /*#__PURE__*/React.createElement("div", {
     style: {
       height: height || 320
     }
@@ -1213,7 +1309,7 @@ function MultiLineChart({
       r: 5
     },
     connectNulls: true
-  })))));
+  }))))));
 }
 
 /* ---------------- Product Lines (scroll-through) ---------------- */
@@ -1481,7 +1577,13 @@ function Pending({
       background: colorOf(p.name),
       flex: "none"
     }
-  }), /*#__PURE__*/React.createElement("b", null, p.name))), /*#__PURE__*/React.createElement("td", {
+  }), /*#__PURE__*/React.createElement("b", null, p.name)), p.issue && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--ink-soft)",
+      marginLeft: 16
+    }
+  }, p.issue)), /*#__PURE__*/React.createElement("td", {
     style: td
   }, p.movedLabel ? SHORT(p.movedLabel) : "—"), /*#__PURE__*/React.createElement("td", {
     style: td
@@ -1591,7 +1693,7 @@ function Parents({
     yFormat: v => v + "%",
     dashed: label => parents.find(x => x.label === label)?.isOverall
   })), /*#__PURE__*/React.createElement(Panel, {
-    title: "Latest Snapshot — Your Avg vs Competitor vs Target",
+    title: "Latest Snapshot — Your Avg vs Target",
     ctx: "Overall pinned, then lowest % first"
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1649,7 +1751,7 @@ function Parents({
     style: td
   }, r.target != null ? r.target.toFixed(2) : "—"), /*#__PURE__*/React.createElement("td", {
     style: td
-  }, r.gap != null ? deltaText(r.gap, "") : "—"), /*#__PURE__*/React.createElement("td", {
+  }, gapText(r.gap)), /*#__PURE__*/React.createElement("td", {
     style: td
   }, r.cur?.pct != null ? (r.cur.pct * 100).toFixed(1) + "%" : "—"))))))));
 }
@@ -1660,7 +1762,8 @@ function Launch({
   months: dashMonths
 }) {
   const [category, setCategory] = useState("All"); // All | Mixed | Own Parent
-  const [plFilter, setPlFilter] = useState("All"); // product line filter for the detail table
+  const [broadCat, setBroadCat] = useState("All"); // All | Zip Bags | Bags | Labels
+  const [statusFilter, setStatusFilter] = useState("All"); // All | Meeting Target | Below Target
 
   if (!launch || !launch.items || !launch.items.length) {
     return /*#__PURE__*/React.createElement(Panel, {
@@ -1671,7 +1774,10 @@ function Launch({
     items,
     checkMonths
   } = launch;
-  const shown = items.filter(i => category === "All" || category === "Mixed" && !i.isOwnParent || category === "Own Parent" && i.isOwnParent);
+  const CATS_ORDER = ["Bags", "Labels"];
+  const presentCats = new Set(items.map(i => broadCategoryFor(i.productLine)));
+  const broadCats = ["All", ...CATS_ORDER.filter(c => presentCats.has(c))];
+  const shown = items.filter(i => (category === "All" || category === "Mixed" && !i.isOwnParent || category === "Own Parent" && i.isOwnParent) && (broadCat === "All" || broadCategoryFor(i.productLine) === broadCat));
   const productLineMap = {};
   shown.forEach(item => {
     const key = item.productLine;
@@ -1703,7 +1809,14 @@ function Launch({
     if (a.brand !== b.brand) return a.brand.localeCompare(b.brand);
     return a.parentSku.localeCompare(b.parentSku);
   });
-  const tableRows = sorted.filter(item => plFilter === "All" || item.productLine === plFilter);
+  const tableRows = sorted.filter(item => statusFilter === "All" || statusFilter === "Meeting Target" && item.status === "meeting" || statusFilter === "Below Target" && item.status === "below");
+  const tableCounts = {
+    total: tableRows.length,
+    meeting: tableRows.filter(i => i.status === "meeting").length,
+    below: tableRows.filter(i => i.status === "below").length,
+    noData: tableRows.filter(i => i.status === "no-data").length
+  };
+  const tablePct = n => tableCounts.total ? `${Math.round(n / tableCounts.total * 100)}%` : "—";
   const counts = {
     total: shown.length,
     meeting: shown.filter(i => i.status === "meeting").length,
@@ -1761,6 +1874,18 @@ function Launch({
     options: [["All", "All"], ["Mixed", "Mixed"], ["Own Parent", "Own Parent"]],
     value: category,
     onChange: setCategory,
+    small: true
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 1,
+      background: "var(--line)",
+      alignSelf: "stretch",
+      margin: "0 4px"
+    }
+  }), /*#__PURE__*/React.createElement(Seg, {
+    options: broadCats.map(c => [c, c]),
+    value: broadCat,
+    onChange: setBroadCat,
     small: true
   })), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1822,11 +1947,31 @@ function Launch({
       marginBottom: 12
     }
   }, /*#__PURE__*/React.createElement(Seg, {
-    options: [["All", "All"], ...productLines.map(pl => [pl, pl])],
-    value: plFilter,
-    onChange: setPlFilter,
+    options: [["All", "All"], ["Meeting Target", "Meeting Target"], ["Below Target", "Below Target"]],
+    value: statusFilter,
+    onChange: setStatusFilter,
     small: true
   })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 18,
+      flexWrap: "wrap",
+      alignItems: "baseline",
+      marginBottom: 14,
+      fontSize: 13
+    }
+  }, [["Meeting target", tableCounts.meeting, "#2f8f4e"], ["Below target", tableCounts.below, "#c0392b"], ["No data yet", tableCounts.noData, "var(--ink-soft)"]].map(([label, n, col]) => /*#__PURE__*/React.createElement("span", {
+    key: label
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: col,
+      fontWeight: 700
+    }
+  }, tablePct(n)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "var(--ink-soft)"
+    }
+  }, " ", label, " ", `(${n})`)))), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: "auto"
     }
@@ -1847,10 +1992,11 @@ function Launch({
   }, ["Parent SKU", "Brand", "Type", "Product Line", "Launch Month", "Target", "Latest Rating", "Latest Reviews", "Status"].map(h => /*#__PURE__*/React.createElement("th", {
     key: h,
     style: th
-  }, h)))), /*#__PURE__*/React.createElement("tbody", null, tableRows.map(item => /*#__PURE__*/React.createElement("tr", {
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, tableRows.map((item, idx) => /*#__PURE__*/React.createElement("tr", {
     key: item.parentAsin,
     style: {
-      borderTop: "1px solid var(--line-soft)"
+      borderTop: "1px solid var(--line-soft)",
+      background: idx % 2 === 1 ? "var(--line-soft)" : "transparent"
     }
   }, /*#__PURE__*/React.createElement("td", {
     style: td
@@ -2224,6 +2370,26 @@ function deltaText(d, suffix, unit, invert) {
   }, arrow, " ", Math.abs(d).toLocaleString(undefined, {
     maximumFractionDigits: 2
   }), unit || ""), " ", suffix);
+}
+// For a snapshot gap (avg vs. target) rather than a month-over-month change — 0 means
+// "right on target", not "no change", and there's no up/down direction to invert.
+function gapText(gap) {
+  if (gap == null) return "—";
+  if (Math.abs(gap) < 0.005) return /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#2f8f4e",
+      fontWeight: 600
+    }
+  }, "On target");
+  const above = gap > 0;
+  const col = above ? "#2f8f4e" : "#c0392b";
+  const arrow = above ? "▲" : "▼";
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: col,
+      fontWeight: 600
+    }
+  }, arrow, " ", Math.abs(gap).toFixed(2));
 }
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(React.createElement(ReviewKPIDashboard));
