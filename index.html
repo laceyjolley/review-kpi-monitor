@@ -747,6 +747,22 @@ function parseWorkbook(wb) {
   };
   lines.sort((a, b) => catOrder[a.category] - catOrder[b.category] || a.name.localeCompare(b.name));
 
+  // ---------- Zero-negative-review months ----------
+  // A pos:neg ratio of exactly 0 in this sheet means "0 negative reviews" (used as a
+  // placeholder since positive/0 isn't a real number) — not "things are bad." Plotting
+  // a literal 0 makes a genuinely great month look like the worst one on the chart. So:
+  // treat a stored 0 as no data point (leaves a gap the line connects across) and flag
+  // it so tables can show it as the good news it actually is, distinct from a month
+  // with no data reported at all.
+  lines.forEach(line => {
+    line.series.forEach(rec => {
+      if (rec && rec.ratio === 0) {
+        rec.ratio = null;
+        rec.zeroNegative = true;
+      }
+    });
+  });
+
   // months that actually have any data
   const monthsWithData = AXIS.filter(m => lines.some(l => {
     const s = l.series[AXIS.indexOf(m)];
@@ -1461,15 +1477,22 @@ function Pending({
   });
   const calcFor = metric => pending.map(p => {
     let latest = null,
-      latestM = null;
+      latestM = null,
+      latestZeroNeg = false;
     if (p.line) {
       for (let i = months.length - 1; i >= 0; i--) {
         const ai = AXIS.indexOf(months[i]);
         if (p.movedIdx >= 0 && ai > p.movedIdx) {
-          const v = p.line.series[ai]?.[metric];
+          const rec = p.line.series[ai];
+          const v = rec?.[metric];
           if (v != null) {
             latest = v;
             latestM = months[i];
+            break;
+          }
+          if (metric === "ratio" && rec?.zeroNegative) {
+            latestM = months[i];
+            latestZeroNeg = true;
             break;
           }
         }
@@ -1482,6 +1505,7 @@ function Pending({
       base,
       latest,
       latestM,
+      latestZeroNeg,
       delta
     };
   });
@@ -1589,7 +1613,18 @@ function Pending({
     style: td
   }, fmt2(ratioRows[i].base)), /*#__PURE__*/React.createElement("td", {
     style: td
-  }, ratioRows[i].latest != null ? /*#__PURE__*/React.createElement("span", null, fmt2(ratioRows[i].latest), " ", /*#__PURE__*/React.createElement("span", {
+  }, ratioRows[i].latestZeroNeg ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#2f8f4e",
+      fontWeight: 600
+    }
+  }, "0 negative reviews", " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "var(--ink-soft)",
+      fontWeight: 400,
+      fontSize: 11
+    }
+  }, "(", SHORT(ratioRows[i].latestM), ")")) : ratioRows[i].latest != null ? /*#__PURE__*/React.createElement("span", null, fmt2(ratioRows[i].latest), " ", /*#__PURE__*/React.createElement("span", {
     style: {
       color: "var(--ink-soft)",
       fontSize: 11
