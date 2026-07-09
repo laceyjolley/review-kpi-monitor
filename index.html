@@ -794,10 +794,30 @@ function parseWorkbook(wb) {
     "Direct Thermal": "Direct Thermal Labels",
     "Warning Labels": "Warning/Moving Labels"
   };
+  // Count distinct sub-rows per type up front, so the fallback below only kicks in
+  // when a row is genuinely the only one for its type — never for one of several
+  // sub-splits (like "Resealable" and "Permanent" both under "Suff Bags") that don't
+  // each have their own line in 2026 KPIs. Borrowing the broader average for a
+  // specific sub-split is what caused Resealable to show "on target" while its own
+  // %-meeting-target tracking said 0% — this keeps that from happening again even if
+  // a sheet still has stray sub-splits in it.
+  const typeSubCounts = {};
+  const prScan = wbRows(wb, "Parents Meeting Targets");
+  if (prScan) {
+    for (let i = 1; i < prScan.length; i++) {
+      const r = prScan[i];
+      const t = (r?.[0] || "").toString().trim();
+      const s = (r?.[1] || "").toString().trim();
+      if (!t) continue;
+      (typeSubCounts[t] = typeSubCounts[t] || new Set()).add(s.toLowerCase());
+    }
+  }
   function resolveAvg(type, subClean) {
     if (subClean) {
       const v = latestAvgFor(subClean);
       if (v != null) return v;
+      const siblingCount = typeSubCounts[type] ? typeSubCounts[type].size : 1;
+      if (siblingCount > 1) return null; // genuine sub-split with no matching line — don't borrow the broader average
     }
     return latestAvgFor(PT_TYPE_ALIAS[type] || type);
   }
@@ -844,19 +864,40 @@ function parseWorkbook(wb) {
         });
       }
     }
-    // Combine only the Direct Thermal sub-rows that don't have their own dedicated
-    // line in 2026 KPIs (Color/White/Fanfold — tracked together under Zebra/Rollo)
-    // into a single row. DYMO and Brother DO have their own lines in 2026 KPIs, so
-    // they stay as their own separate rows with their own average, even though
-    // they're nested under the same "Direct Thermal" type in this sheet.
-    const dtAll = parents.filter(p => p.type === "Direct Thermal");
-    const dtMerge = dtAll.filter(p => !lines.some(l => l.name.toLowerCase() === (p.sub || "").toLowerCase()));
-    if (dtMerge.length > 1) {
-      const mergeSubs = new Set(dtMerge.map(p => p.sub));
-      parents = parents.filter(p => !(p.type === "Direct Thermal" && mergeSubs.has(p.sub)));
+    // Collapse orphaned sub-splits — sub-rows whose specific sub-value has no matching
+    // line in 2026 KPIs (e.g. Resealable/Permanent under Suff Bags, 1.1/2.2 Mil under
+    // Flat Bags, Color/White/Fanfold under Direct Thermal) — into a single row per
+    // type, rather than showing them separately with a blank or borrowed average.
+    // Sub-rows that DO have their own dedicated line (DYMO, Brother, each Zip Bags
+    // mil-weight) are left exactly as they are.
+    const MERGE_LABEL_OVERRIDE = {
+      "Direct Thermal": "Zebra/Rollo Direct Thermal"
+    };
+    const MERGE_LOOKUP_OVERRIDE = {
+      "Direct Thermal": "Zebra/Rollo"
+    };
+    const byType = {};
+    parents.forEach(p => {
+      if (!p.isOverall) (byType[p.type] = byType[p.type] || []).push(p);
+    });
+    const toMerge = [];
+    Object.keys(byType).forEach(type => {
+      const rows = byType[type];
+      const orphans = rows.filter(p => !lines.some(l => l.name.toLowerCase() === (p.sub || "").toLowerCase()));
+      if (orphans.length > 1) toMerge.push({
+        type,
+        orphans
+      });
+    });
+    toMerge.forEach(({
+      type,
+      orphans
+    }) => {
+      const orphanSubs = new Set(orphans.map(p => p.sub));
+      parents = parents.filter(p => !(p.type === type && orphanSubs.has(p.sub)));
       const mergedSeries = PT_MONTHS.map((_, gi) => {
-        const total = dtMerge.reduce((a, p) => a + (p.series[gi].total || 0), 0) || null;
-        const meeting = dtMerge.reduce((a, p) => a + (p.series[gi].meeting || 0), 0) || null;
+        const total = orphans.reduce((a, p) => a + (p.series[gi].total || 0), 0) || null;
+        const meeting = orphans.reduce((a, p) => a + (p.series[gi].meeting || 0), 0) || null;
         const pctVal = total ? meeting / total : null;
         return {
           total,
@@ -864,22 +905,24 @@ function parseWorkbook(wb) {
           pct: pctVal
         };
       });
-      const combinedTarget = dtMerge.map(p => p.target).find(v => v != null) ?? null;
-      const combinedReviews = dtMerge.reduce((a, p) => a + (p.reviewCount || 0), 0) || null;
+      const combinedTarget = orphans.map(p => p.target).find(v => v != null) ?? null;
+      const combinedReviews = orphans.reduce((a, p) => a + (p.reviewCount || 0), 0) || null;
+      const label = MERGE_LABEL_OVERRIDE[type] || PT_TYPE_ALIAS[type] || type;
+      const lookupName = MERGE_LOOKUP_OVERRIDE[type] || PT_TYPE_ALIAS[type] || type;
       parents.push({
-        type: "Direct Thermal",
+        type,
         sub: "",
-        label: "Zebra/Rollo Direct Thermal",
-        shortLabel: "Zebra/Rollo Direct Thermal",
-        category: "Labels",
+        label,
+        shortLabel: label,
+        category: orphans[0].category,
         isOverall: false,
         reviewCount: combinedReviews,
-        avg: latestAvgFor("Zebra/Rollo") ?? latestAvgFor("Direct Thermal Labels"),
+        avg: latestAvgFor(lookupName),
         compAvg: null,
         target: combinedTarget,
         series: mergedSeries
       });
-    }
+    });
   }
 
   // ---------- Pending Resolution (validation watch list) ----------
