@@ -822,22 +822,35 @@ function parseWorkbook(wb) {
     return latestAvgFor(PT_TYPE_ALIAS[type] || type);
   }
   let parents = [];
+  let ptMonths = [];
+  let ptCols = [];
   const prAll = wbRows(wb, "Parents Meeting Targets");
   if (prAll) {
     const pr = prAll;
-    const PT_MONTHS = ["Dec", "Jan", "Feb", "March", "April", "May", "June"];
+    // Auto-detect the month groups from the header row instead of a fixed list,
+    // so new months extend the chart on their own. Each month is a 3-column
+    // group (Total / Meeting / %); the reliable marker is the
+    // "Total Number of Parents (<Month>)" header, repeating every 3 columns.
+    const MON3 = { jan: "Jan", feb: "Feb", mar: "Mar", march: "Mar", apr: "Apr", april: "Apr",
+      may: "May", jun: "Jun", june: "Jun", jul: "Jul", july: "Jul", aug: "Aug", august: "Aug",
+      sep: "Sep", sept: "Sep", september: "Sep", oct: "Oct", october: "Oct",
+      nov: "Nov", november: "Nov", dec: "Dec", december: "Dec" };
+    (pr[0] || []).forEach((cell, c) => {
+      const m = (cell || "").toString().match(/total number of parents\s*\(([^)]+)\)/i);
+      if (m) { const key = m[1].trim().toLowerCase(); ptCols.push({ label: MON3[key] || m[1].trim(), col: c }); }
+    });
+    ptMonths = ptCols.map(g => g.label);
     for (let i = 1; i < pr.length; i++) {
       const row = pr[i];
       const type = (row[0] || "").toString().trim();
       const sub = (row[1] || "").toString().trim();
       if (!type && !sub) continue;
       if (PT_DROP_TYPES.has(type)) continue; // discontinued
-      const series = PT_MONTHS.map((_, gi) => {
-        const b = 6 + gi * 3;
+      const series = ptCols.map(({ col }) => {
         return {
-          total: toNum(row[b]),
-          meeting: toNum(row[b + 1]),
-          pct: pct(row[b + 2])
+          total: toNum(row[col]),
+          meeting: toNum(row[col + 1]),
+          pct: pct(row[col + 2])
         };
       });
       const subCleanCheck = sub && sub.toLowerCase() !== "all" ? sub : "";
@@ -895,7 +908,7 @@ function parseWorkbook(wb) {
     }) => {
       const orphanSubs = new Set(orphans.map(p => p.sub));
       parents = parents.filter(p => !(p.type === type && orphanSubs.has(p.sub)));
-      const mergedSeries = PT_MONTHS.map((_, gi) => {
+      const mergedSeries = ptCols.map((_, gi) => {
         const total = orphans.reduce((a, p) => a + (p.series[gi].total || 0), 0) || null;
         const meeting = orphans.reduce((a, p) => a + (p.series[gi].meeting || 0), 0) || null;
         const pctVal = total ? meeting / total : null;
@@ -966,7 +979,7 @@ function parseWorkbook(wb) {
     pending,
     launch: parseLaunchTracker(wb),
     months: monthsWithData,
-    ptMonths: ["Dec", "Jan", "Feb", "Mar", "Apr", "May"]
+    ptMonths
   };
 }
 
