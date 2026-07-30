@@ -825,7 +825,7 @@ function parseWorkbook(wb) {
   const prAll = wbRows(wb, "Parents Meeting Targets");
   if (prAll) {
     const pr = prAll;
-    const PT_MONTHS = ["Dec", "Jan", "Feb", "March", "April", "May"];
+    const PT_MONTHS = ["Dec", "Jan", "Feb", "March", "April", "May", "June"];
     for (let i = 1; i < pr.length; i++) {
       const row = pr[i];
       const type = (row[0] || "").toString().trim();
